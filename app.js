@@ -66,6 +66,88 @@ function scaleAmount(amount, f) {
   });
 }
 
+/* ---------- まとめて入力（音声入力・貼り付けの解析） ---------- */
+const AMT_SRC = (() => {
+  const PREFIX = '(?:各\\s*)?(?:大さじ|小さじ|大匙|小匙|カップ|茶碗|約)';
+  const NUM = '(?:各\\s*)?(?:\\d+(?:\\.\\d+)?(?:と\\d+\\/\\d+|\\/\\d+)?|[一二三四五六七八九十百千]+|半)';
+  const UNIT = '(?:kg|g|ml|cc|l|個|本|枚|片|かけ|株|束|袋|パック|缶|切れ|玉|房|丁|合|杯|カップ|尾|匹|cm|センチ|グラム|ミリリットル|リットル)';
+  const SUFFIX = '半?(?:分|程度|くらい|ぐらい|ほど|強|弱)?';
+  const WORD = '各?(?:少々|適量|適宜|少量|ひとつまみ|ひとつかみ|お好みで|好みで)';
+  return `(?:${PREFIX}\\s*${NUM}\\s*${UNIT}?${SUFFIX}|${NUM}\\s*${UNIT}${SUFFIX}|半分|\\d+(?:\\.\\d+)?|${WORD})`;
+})();
+const AMT_RUN = new RegExp(AMT_SRC, 'gi');
+const AMT_END = new RegExp(`^(.*?)[\\s:….]*(${AMT_SRC})$`, 'i');
+const KANJI_DIGIT = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+const KANJI_UNIT = { 十: 10, 百: 100, 千: 1000 };
+// 「二百五十」→ 250
+const kanjiToNum = s => s.replace(/[一二三四五六七八九十百千]+/g, m => {
+  let total = 0, digit = 0;
+  for (const c of m) {
+    if (c in KANJI_DIGIT) digit = KANJI_DIGIT[c];
+    else { total += (digit || 1) * KANJI_UNIT[c]; digit = 0; }
+  }
+  return String(total + digit);
+});
+
+// 「じゃがいも2個玉ねぎ1個」のように区切りなしで続く場合、分量の直後で分ける
+function splitRuns(s) {
+  const out = [];
+  let last = 0;
+  for (const m of s.matchAll(AMT_RUN)) {
+    if (!m[0] || m.index <= last) continue;
+    const end = m.index + m[0].length;
+    const rest = s.slice(end).trimStart();
+    if (rest && !/^[\d/と〜~\-()]/.test(rest) && s.slice(last, m.index).trim()) {
+      out.push(s.slice(last, end));
+      last = end;
+    }
+  }
+  out.push(s.slice(last));
+  return out;
+}
+
+// 「じゃがいも2個、玉ねぎ1個、しょうゆ大さじ2」→ [{name, amount}, ...]
+function parseIngredients(text) {
+  const items = [];
+  for (const bigLine of String(text).normalize('NFKC').split(/\r?\n/)) {
+    const group = [];
+    for (let line of bigLine.split(/[、,。;]/)) {
+      line = line.replace(/^[\s・\-*●○◎■□◆◇※>]+/, '').replace(/^\(?\d+[.)]\s+/, '').trim();
+      if (!line || /^[【\[(]?(材料|作り方|手順)/.test(line)) continue;
+      for (const piece of splitRuns(line)) {
+        const p = piece.trim();
+        if (!p) continue;
+        let name = p, amount = '';
+        const m = p.match(AMT_END);
+        if (m && m[1].trim()) { name = m[1]; amount = m[2]; }
+        else {
+          const s = p.match(/^(.+?)[\s:….]+(\S.*)$/);
+          if (s) { name = s[1]; amount = s[2]; }
+        }
+        group.push({ name: name.trim().replace(/を$/, ''), amount: kanjiToNum(amount.trim()) });
+      }
+    }
+    // 「しょうゆ、みりん 各大さじ2」→ 直前の分量なしの材料にも同じ分量を入れる
+    for (let i = group.length - 1; i >= 0; i--) {
+      if (!group[i].amount.startsWith('各')) continue;
+      const amt = group[i].amount.replace(/^各\s*/, '');
+      group[i].amount = amt;
+      for (let j = i - 1; j >= 0 && !group[j].amount; j--) group[j].amount = amt;
+    }
+    items.push(...group);
+  }
+  return items;
+}
+
+// 複数行なら1行＝1手順、1行だけ（音声入力など）なら「。」ごとに分ける
+function parseSteps(text) {
+  const lines = String(text).split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const raw = lines.length > 1 ? lines : ((lines[0] || '').match(/[^。]+。?/g) || []);
+  return raw
+    .map(s => s.replace(/^(?:(?:手順|STEP|ＳＴＥＰ)\s*[0-9０-９]+[.．:：)）]?|[（(]?[0-9０-９]+[.．):）：、]|[①-⑳])\s*/i, '').trim())
+    .filter(s => s && s !== '。' && !/^[【\[(（]?(作り方|手順)[】\])）]?$/.test(s));
+}
+
 /* ---------- 画像 ---------- */
 function loadImage(file) {
   return new Promise((resolve, reject) => {
@@ -350,6 +432,16 @@ const stepRow = (s = '') => `
     </div>
   </div>`;
 
+const bulkPanel = (kind, placeholder, help, applyLabel) => `
+  <div class="bulk" id="bulk-${kind}" hidden>
+    <textarea rows="4" placeholder="${esc(placeholder)}"></textarea>
+    <p class="muted small">${esc(help)}</p>
+    <div class="bulk-actions">
+      <button type="button" class="btn secondary" data-bulk-cancel>やめる</button>
+      <button type="button" class="btn primary" data-bulk-apply="${kind}">${esc(applyLabel)}</button>
+    </div>
+  </div>`;
+
 async function renderEdit(id) {
   const r = id ? await DB.get(id) : null;
   if (id && !r) { location.replace('#/'); return; }
@@ -379,12 +471,20 @@ async function renderEdit(id) {
       <fieldset>
         <legend>材料</legend>
         <div id="ingRows">${(d.ingredients.length ? d.ingredients : [{}]).map(ingRow).join('')}</div>
-        <button type="button" class="btn secondary" id="addIng">＋ 材料を追加</button>
+        <div class="fs-actions">
+          <button type="button" class="btn secondary" id="addIng">＋ 材料を追加</button>
+          <button type="button" class="btn secondary" data-bulk="ing">🎤 まとめて入力</button>
+        </div>
+        ${bulkPanel('ing', '例：じゃがいも2個、玉ねぎ1個、しょうゆ大さじ2', '「、」や改行で区切ると、材料ごとに分かれます。キーボードの🎤で話してもOKです。', '材料に追加')}
       </fieldset>
       <fieldset>
         <legend>作り方</legend>
         <div id="stepRows">${(d.steps.length ? d.steps : ['']).map(stepRow).join('')}</div>
-        <button type="button" class="btn secondary" id="addStep">＋ 手順を追加</button>
+        <div class="fs-actions">
+          <button type="button" class="btn secondary" id="addStep">＋ 手順を追加</button>
+          <button type="button" class="btn secondary" data-bulk="step">🎤 まとめて入力</button>
+        </div>
+        ${bulkPanel('step', '例：じゃがいもを一口大に切る。鍋で炒める。水を入れて15分煮る。', '「。」で区切って話すか、1行に1手順ずつ書くと、手順ごとに分かれます。', '手順に追加')}
       </fieldset>
       <label class="field"><span>メモ</span><textarea name="memo" rows="3" placeholder="コツ・アレンジなど">${esc(d.memo)}</textarea></label>
       <label class="field"><span>参考URL</span><input name="source" type="url" inputmode="url" value="${esc(d.source)}" placeholder="https://..."></label>
@@ -421,7 +521,38 @@ async function renderEdit(id) {
   $('#addIng').addEventListener('click', () => addRow($('#ingRows'), ingRow()));
   $('#addStep').addEventListener('click', () => addRow($('#stepRows'), stepRow()));
 
+  const applyBulk = kind => {
+    const panel = $(`#bulk-${kind}`);
+    const ta = $('textarea', panel);
+    const isIng = kind === 'ing';
+    const parsed = isIng ? parseIngredients(ta.value) : parseSteps(ta.value);
+    if (!parsed.length) { toast(isIng ? '材料が見つかりませんでした' : '手順が見つかりませんでした'); return; }
+    // 空の行は取り除いてから、解析結果を末尾に追加する
+    if (isIng) $$('.row.ing').filter(x => !$('.name', x).value.trim() && !$('.amount', x).value.trim()).forEach(x => x.remove());
+    else $$('.row.step').filter(x => !$('textarea', x).value.trim()).forEach(x => x.remove());
+    $(isIng ? '#ingRows' : '#stepRows').insertAdjacentHTML('beforeend', parsed.map(isIng ? ingRow : stepRow).join(''));
+    ta.value = '';
+    panel.hidden = true;
+    toast(`${parsed.length}件の${isIng ? '材料' : '手順'}を追加しました`);
+  };
+
   form.addEventListener('click', e => {
+    const open = e.target.closest('[data-bulk]');
+    if (open) {
+      const panel = $(`#bulk-${open.dataset.bulk}`);
+      panel.hidden = !panel.hidden;
+      if (!panel.hidden) $('textarea', panel).focus();
+      return;
+    }
+    if (e.target.closest('[data-bulk-cancel]')) {
+      const panel = e.target.closest('.bulk');
+      $('textarea', panel).value = '';
+      panel.hidden = true;
+      return;
+    }
+    const apply = e.target.closest('[data-bulk-apply]');
+    if (apply) { applyBulk(apply.dataset.bulkApply); return; }
+
     const row = e.target.closest('.row');
     if (!row) return;
     if (e.target.closest('.del')) row.remove();
