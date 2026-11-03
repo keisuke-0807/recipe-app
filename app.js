@@ -1,0 +1,510 @@
+'use strict';
+
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+const view = $('#view');
+
+const CATEGORIES = ['主菜', '副菜', '汁物・スープ', 'ご飯・麺', 'パン', 'お菓子', 'その他'];
+const listState = { q: '', cat: '', fav: false, scroll: 0 };
+
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
+// 検索用の正規化：全角→半角、大文字→小文字、カタカナ→ひらがな
+const norm = s => String(s ?? '').normalize('NFKC').toLowerCase()
+  .replace(/[ァ-ヶ]/g, c => String.fromCharCode(c.charCodeAt(0) - 0x60));
+const safeURL = u => /^https?:\/\//i.test(String(u || '').trim());
+
+/* ---------- 共通 UI ---------- */
+function setHeader({ title = '', back = '', actions = '' }) {
+  const b = $('#back');
+  b.hidden = !back;
+  b.href = back || '#/';
+  $('#title').textContent = title;
+  $('#actions').innerHTML = actions;
+}
+
+let toastTimer;
+function toast(msg) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 2400);
+}
+
+const photoCache = new Map();
+function photoURL(r) {
+  if (!r.photo) return '';
+  const hit = photoCache.get(r.id);
+  if (hit && hit.v === r.updatedAt) return hit.url;
+  if (hit) URL.revokeObjectURL(hit.url);
+  const url = URL.createObjectURL(r.photo);
+  photoCache.set(r.id, { v: r.updatedAt, url });
+  return url;
+}
+
+const tagsHTML = tags => (tags && tags.length)
+  ? `<div class="tags">${tags.map(t => `<span class="tag">#${esc(t)}</span>`).join('')}</div>` : '';
+
+/* ---------- 分量の換算 ---------- */
+function fmtNum(v) {
+  const r = Math.round(v * 100) / 100;
+  const int = Math.floor(r);
+  const dec = Math.round((r - int) * 100) / 100;
+  const frac = { 0.25: '1/4', 0.33: '1/3', 0.5: '1/2', 0.67: '2/3', 0.75: '3/4' }[dec];
+  if (dec && frac) return int ? `${int}と${frac}` : frac;
+  return String(r);
+}
+// "200g" "大さじ1と1/2" "1/2個" などの数値部分だけを倍率で変換する
+function scaleAmount(amount, f) {
+  if (f === 1 || !amount) return amount;
+  return amount.normalize('NFKC').replace(/(\d+(?:\.\d+)?)(?:と(\d+)\/(\d+)|\/(\d+))?/g, (m, a, b, c, d) => {
+    let v = Number(a);
+    if (b && c) v += Number(b) / Number(c);
+    else if (d) v /= Number(d);
+    return fmtNum(v * f);
+  });
+}
+
+/* ---------- 画像 ---------- */
+function loadImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('画像を読み込めませんでした')); };
+    img.src = url;
+  });
+}
+async function resizeImage(file, max = 1200) {
+  const img = await loadImage(file);
+  const s = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+  const c = document.createElement('canvas');
+  c.width = Math.round(img.naturalWidth * s);
+  c.height = Math.round(img.naturalHeight * s);
+  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+  return new Promise(res => c.toBlob(res, 'image/jpeg', 0.82));
+}
+const blobToDataURL = blob => new Promise((resolve, reject) => {
+  const fr = new FileReader();
+  fr.onload = () => resolve(fr.result);
+  fr.onerror = () => reject(fr.error);
+  fr.readAsDataURL(blob);
+});
+
+/* ---------- 画面のスリープ防止（調理モード） ---------- */
+let wakeLock = null;
+function releaseWakeLock() {
+  if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+}
+async function toggleWake(btn) {
+  const label = on => { btn.classList.toggle('on', on); btn.textContent = on ? '🔆 調理モード中（タップで解除）' : '🔆 調理モード（画面を消さない）'; };
+  if (wakeLock) { releaseWakeLock(); label(false); return; }
+  if (!('wakeLock' in navigator)) { toast('この端末では使えません'); return; }
+  try {
+    wakeLock = await navigator.wakeLock.request('screen');
+    label(true);
+    wakeLock.addEventListener('release', () => { wakeLock = null; label(false); });
+  } catch {
+    toast('スリープ防止を開始できませんでした');
+  }
+}
+
+/* ---------- 一覧 ---------- */
+function haystack(r) {
+  return norm([r.title, r.category, r.memo, ...(r.tags || []), ...(r.ingredients || []).map(i => i.name)].join(' '));
+}
+const card = r => `
+  <li><a class="card" href="#/r/${encodeURIComponent(r.id)}">
+    <div class="thumb">${r.photo ? `<img src="${photoURL(r)}" alt="" loading="lazy">` : '<span>🍽</span>'}</div>
+    <div class="info">
+      <div class="name">${r.favorite ? '<span class="star">★</span>' : ''}${esc(r.title)}</div>
+      <div class="meta">${[r.category, r.time ? `${r.time}分` : ''].filter(Boolean).map(esc).join(' · ')}</div>
+      ${tagsHTML(r.tags)}
+    </div>
+  </a></li>`;
+
+async function renderList() {
+  setHeader({ title: 'レシピ帳', actions: '<a class="icon-btn" href="#/settings" aria-label="設定">⚙︎</a>' });
+  const all = await DB.all();
+  const usedCats = new Set(all.map(r => r.category).filter(Boolean));
+  const cats = [...CATEGORIES.filter(c => usedCats.has(c)), ...[...usedCats].filter(c => !CATEGORIES.includes(c))];
+  view.innerHTML = `
+    <div class="search"><input id="q" type="search" placeholder="料理名・材料・タグで検索" value="${esc(listState.q)}" enterkeyhint="search"></div>
+    <div class="chips" id="chips">
+      <button class="chip ${!listState.cat && !listState.fav ? 'on' : ''}" data-cat="">すべて</button>
+      <button class="chip ${listState.fav ? 'on' : ''}" data-fav="1">★ お気に入り</button>
+      ${cats.map(c => `<button class="chip ${listState.cat === c ? 'on' : ''}" data-cat="${esc(c)}">${esc(c)}</button>`).join('')}
+    </div>
+    <ul class="cards" id="cards"></ul>
+    <a class="fab" href="#/new" aria-label="レシピを追加">＋</a>`;
+
+  const draw = () => {
+    const words = norm(listState.q).split(/\s+/).filter(Boolean);
+    const list = all
+      .filter(r => (!listState.cat || r.category === listState.cat) && (!listState.fav || r.favorite))
+      .filter(r => { const h = haystack(r); return words.every(w => h.includes(w)); })
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+    $('#cards').innerHTML = list.length ? list.map(card).join('')
+      : all.length ? '<li class="empty">該当するレシピがありません</li>'
+      : `<li class="empty">まだレシピがありません。<br>右下の ＋ から追加しましょう。<br><button class="btn secondary" id="sample">サンプルを1件追加してみる</button></li>`;
+    $('#sample')?.addEventListener('click', async () => { await addSample(); renderList(); });
+  };
+  draw();
+
+  $('#q').addEventListener('input', e => { listState.q = e.target.value; draw(); });
+  $('#chips').addEventListener('click', e => {
+    const b = e.target.closest('.chip');
+    if (!b) return;
+    if (b.dataset.fav) { listState.fav = !listState.fav; listState.cat = ''; }
+    else { listState.cat = b.dataset.cat; listState.fav = false; }
+    $$('.chip').forEach(x => x.classList.toggle('on',
+      x.dataset.fav ? listState.fav : (x.dataset.cat === listState.cat && !listState.fav)));
+    draw();
+  });
+}
+
+function addSample() {
+  const now = Date.now();
+  return DB.put({
+    id: uid(), title: '肉じゃが', category: '主菜', servings: 2, time: 30,
+    tags: ['和食', '定番'],
+    ingredients: [
+      { name: '豚こま肉', amount: '150g' }, { name: 'じゃがいも', amount: '2個' },
+      { name: '玉ねぎ', amount: '1/2個' }, { name: 'にんじん', amount: '1/2本' },
+      { name: '水', amount: '200ml' }, { name: 'しょうゆ', amount: '大さじ2' },
+      { name: 'みりん', amount: '大さじ2' }, { name: '砂糖', amount: '大さじ1と1/2' },
+    ],
+    steps: [
+      'じゃがいもは一口大、玉ねぎはくし切り、にんじんは乱切りにする。',
+      '鍋に油をひき、豚肉を炒める。色が変わったら野菜を加えて炒める。',
+      '水と調味料を入れ、落としぶたをして弱めの中火で15分ほど煮る。',
+      'じゃがいもに竹串がすっと通ったら完成。',
+    ],
+    memo: 'これはサンプルです。編集・削除して自由に使ってください。',
+    source: '', photo: null, favorite: false, createdAt: now, updatedAt: now,
+  });
+}
+
+/* ---------- 詳細 ---------- */
+async function renderDetail(id) {
+  const r = await DB.get(id);
+  if (!r) { location.replace('#/'); return; }
+  setHeader({
+    back: '#/',
+    actions: `<button class="icon-btn" id="fav" aria-label="お気に入り">${r.favorite ? '★' : '☆'}</button>
+              <a class="text-btn" href="#/edit/${encodeURIComponent(r.id)}">編集</a>`,
+  });
+  const base = Number(r.servings) || 0;
+  let servings = base;
+  const meta = [r.category, r.time ? `⏱ ${r.time}分` : '', base ? `${base}人分` : ''].filter(Boolean);
+  view.innerHTML = `
+    ${r.photo ? `<img class="hero" src="${photoURL(r)}" alt="">` : ''}
+    <article class="detail">
+      <h2>${esc(r.title)}</h2>
+      ${meta.length ? `<p class="meta">${meta.map(esc).join(' · ')}</p>` : ''}
+      ${tagsHTML(r.tags)}
+      <div class="section-head">
+        <h3>材料</h3>
+        ${base ? '<div class="stepper"><button id="minus" aria-label="人数を減らす">−</button><span id="srv"></span><button id="plus" aria-label="人数を増やす">＋</button></div>' : ''}
+      </div>
+      <ul class="ingredients checklist" id="ing"></ul>
+      <h3>作り方</h3>
+      <ol class="steps checklist">${(r.steps || []).map(s => `<li>${esc(s)}</li>`).join('') || '<li class="muted">（未登録）</li>'}</ol>
+      ${r.memo ? `<h3>メモ</h3><p class="memo">${esc(r.memo)}</p>` : ''}
+      ${safeURL(r.source) ? `<h3>参考</h3><p><a class="source" href="${esc(r.source.trim())}" target="_blank" rel="noopener">${esc(r.source)}</a></p>` : ''}
+      <p class="hint">材料や手順はタップするとチェックできます</p>
+      <button class="btn secondary wide" id="wake">🔆 調理モード（画面を消さない）</button>
+    </article>`;
+
+  const drawIng = () => {
+    const f = base ? servings / base : 1;
+    if (base) $('#srv').textContent = `${servings}人分`;
+    $('#ing').innerHTML = (r.ingredients || []).map(i =>
+      `<li><span>${esc(i.name)}</span><span class="amt">${esc(scaleAmount(i.amount, f))}</span></li>`).join('')
+      || '<li class="muted">（未登録）</li>';
+  };
+  drawIng();
+
+  $('#minus')?.addEventListener('click', () => { servings = Math.max(1, servings - 1); drawIng(); });
+  $('#plus')?.addEventListener('click', () => { servings = Math.min(99, servings + 1); drawIng(); });
+  $('.detail').addEventListener('click', e => {
+    const li = e.target.closest('.checklist li');
+    if (li && !li.classList.contains('muted')) li.classList.toggle('done');
+  });
+  $('#fav').addEventListener('click', async e => {
+    r.favorite = !r.favorite;
+    await DB.put(r);
+    e.currentTarget.textContent = r.favorite ? '★' : '☆';
+    toast(r.favorite ? 'お気に入りに追加しました' : 'お気に入りから外しました');
+  });
+  $('#wake').addEventListener('click', e => toggleWake(e.currentTarget));
+}
+
+/* ---------- 編集 ---------- */
+const ingRow = (i = {}) => `
+  <div class="row ing">
+    <input class="name" placeholder="材料" value="${esc(i.name)}" enterkeyhint="next">
+    <input class="amount" placeholder="分量" value="${esc(i.amount)}" enterkeyhint="next">
+    <button type="button" class="icon-btn del" aria-label="削除">×</button>
+  </div>`;
+const stepRow = (s = '') => `
+  <div class="row step">
+    <span class="num"></span>
+    <textarea rows="2" placeholder="手順">${esc(s)}</textarea>
+    <div class="ops">
+      <button type="button" class="icon-btn up" aria-label="上へ">↑</button>
+      <button type="button" class="icon-btn down" aria-label="下へ">↓</button>
+      <button type="button" class="icon-btn del" aria-label="削除">×</button>
+    </div>
+  </div>`;
+
+async function renderEdit(id) {
+  const r = id ? await DB.get(id) : null;
+  if (id && !r) { location.replace('#/'); return; }
+  const d = r || { title: '', category: '', servings: 2, time: '', tags: [], ingredients: [{}, {}, {}], steps: ['', ''], memo: '', source: '' };
+  let photo = r?.photo || null;
+  let previewURL = '';
+
+  setHeader({
+    title: r ? 'レシピを編集' : '新しいレシピ',
+    back: r ? `#/r/${encodeURIComponent(r.id)}` : '#/',
+    actions: '<button class="text-btn strong" id="saveTop">保存</button>',
+  });
+  const catOptions = [...CATEGORIES, ...(d.category && !CATEGORIES.includes(d.category) ? [d.category] : [])];
+  view.innerHTML = `
+    <form class="edit" id="form" novalidate autocomplete="off">
+      <div class="photo-pick" id="photoPick" role="button" tabindex="0" aria-label="写真を選ぶ"></div>
+      <input type="file" accept="image/*" id="photoInput" hidden>
+      <label class="field"><span>料理名 <em>*</em></span><input name="title" value="${esc(d.title)}" placeholder="例：肉じゃが"></label>
+      <div class="row3">
+        <label class="field"><span>カテゴリ</span>
+          <select name="category"><option value="">なし</option>${catOptions.map(c => `<option ${c === d.category ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
+        </label>
+        <label class="field"><span>何人分</span><input name="servings" type="number" inputmode="numeric" min="1" value="${esc(d.servings)}"></label>
+        <label class="field"><span>時間(分)</span><input name="time" type="number" inputmode="numeric" min="0" value="${esc(d.time)}"></label>
+      </div>
+      <label class="field"><span>タグ（スペース区切り）</span><input name="tags" value="${esc((d.tags || []).join(' '))}" placeholder="例：和食 作り置き 簡単"></label>
+      <fieldset>
+        <legend>材料</legend>
+        <div id="ingRows">${(d.ingredients.length ? d.ingredients : [{}]).map(ingRow).join('')}</div>
+        <button type="button" class="btn secondary" id="addIng">＋ 材料を追加</button>
+      </fieldset>
+      <fieldset>
+        <legend>作り方</legend>
+        <div id="stepRows">${(d.steps.length ? d.steps : ['']).map(stepRow).join('')}</div>
+        <button type="button" class="btn secondary" id="addStep">＋ 手順を追加</button>
+      </fieldset>
+      <label class="field"><span>メモ</span><textarea name="memo" rows="3" placeholder="コツ・アレンジなど">${esc(d.memo)}</textarea></label>
+      <label class="field"><span>参考URL</span><input name="source" type="url" inputmode="url" value="${esc(d.source)}" placeholder="https://..."></label>
+      <button class="btn primary wide" type="submit">保存</button>
+      ${r ? '<button type="button" class="btn danger wide" id="delete">このレシピを削除</button>' : ''}
+    </form>`;
+
+  const form = $('#form');
+  const drawPhoto = () => {
+    if (previewURL) URL.revokeObjectURL(previewURL);
+    previewURL = photo ? URL.createObjectURL(photo) : '';
+    $('#photoPick').innerHTML = photo
+      ? `<img src="${previewURL}" alt=""><button type="button" class="photo-remove" id="photoRemove">写真を削除</button>`
+      : '<span>📷<br>写真を追加</span>';
+  };
+  drawPhoto();
+
+  $('#photoPick').addEventListener('click', e => {
+    if (e.target.id === 'photoRemove') { photo = null; drawPhoto(); return; }
+    $('#photoInput').click();
+  });
+  $('#photoInput').addEventListener('change', async e => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    try { photo = await resizeImage(file); drawPhoto(); }
+    catch (err) { toast(err.message); }
+  });
+
+  const addRow = (container, html) => {
+    container.insertAdjacentHTML('beforeend', html);
+    container.lastElementChild.querySelector('input, textarea').focus();
+  };
+  $('#addIng').addEventListener('click', () => addRow($('#ingRows'), ingRow()));
+  $('#addStep').addEventListener('click', () => addRow($('#stepRows'), stepRow()));
+
+  form.addEventListener('click', e => {
+    const row = e.target.closest('.row');
+    if (!row) return;
+    if (e.target.closest('.del')) row.remove();
+    else if (e.target.closest('.up') && row.previousElementSibling) row.after(row.previousElementSibling);
+    else if (e.target.closest('.down') && row.nextElementSibling) row.before(row.nextElementSibling);
+  });
+  // 材料欄で Enter → 次の欄 / 最後なら行を追加
+  form.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' || e.isComposing || !e.target.closest('.row.ing')) return;
+    e.preventDefault();
+    const row = e.target.closest('.row');
+    if (e.target.classList.contains('name')) { $('.amount', row).focus(); return; }
+    if (row.nextElementSibling) $('.name', row.nextElementSibling).focus();
+    else addRow($('#ingRows'), ingRow());
+  });
+
+  const save = async () => {
+    const fd = new FormData(form);
+    const title = fd.get('title').trim();
+    if (!title) { toast('料理名を入力してください'); form.title.focus(); return; }
+    const now = Date.now();
+    const rec = {
+      ...(r || {}),
+      id: r?.id || uid(),
+      title,
+      category: fd.get('category'),
+      servings: Number(fd.get('servings')) || '',
+      time: Number(fd.get('time')) || '',
+      tags: [...new Set(fd.get('tags').split(/[\s,、，]+/).map(t => t.replace(/^[#＃]/, '')).filter(Boolean))],
+      ingredients: $$('.row.ing').map(x => ({ name: $('.name', x).value.trim(), amount: $('.amount', x).value.trim() }))
+        .filter(i => i.name || i.amount),
+      steps: $$('.row.step textarea').map(t => t.value.trim()).filter(Boolean),
+      memo: fd.get('memo').trim(),
+      source: fd.get('source').trim(),
+      photo,
+      favorite: r?.favorite || false,
+      createdAt: r?.createdAt || now,
+      updatedAt: now,
+    };
+    try {
+      await DB.put(rec);
+    } catch (err) {
+      toast('保存に失敗しました: ' + err.message);
+      return;
+    }
+    if (previewURL) URL.revokeObjectURL(previewURL);
+    toast('保存しました');
+    location.replace(`#/r/${encodeURIComponent(rec.id)}`);
+  };
+  form.addEventListener('submit', e => { e.preventDefault(); save(); });
+  $('#saveTop').addEventListener('click', save);
+
+  $('#delete')?.addEventListener('click', async () => {
+    if (!confirm(`「${r.title}」を削除しますか？\nこの操作は取り消せません。`)) return;
+    await DB.del(r.id);
+    const hit = photoCache.get(r.id);
+    if (hit) { URL.revokeObjectURL(hit.url); photoCache.delete(r.id); }
+    toast('削除しました');
+    location.replace('#/');
+  });
+}
+
+/* ---------- 設定・バックアップ ---------- */
+async function exportData() {
+  const all = await DB.all();
+  const recipes = await Promise.all(all.map(async r => ({ ...r, photo: r.photo ? await blobToDataURL(r.photo) : null })));
+  const json = JSON.stringify({ app: 'recipe-book', version: 1, exportedAt: new Date().toISOString(), recipes });
+  const name = `recipes-${new Date().toISOString().slice(0, 10)}.json`;
+  const file = new File([json], name, { type: 'application/json' });
+  // iPhone では共有シート経由で「ファイルに保存」できるようにする
+  if (matchMedia('(pointer: coarse)').matches && navigator.canShare?.({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: 'レシピのバックアップ' }); return; }
+    catch (e) { if (e.name === 'AbortError') return; }
+  }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(file);
+  a.download = name;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+}
+
+async function importData(file) {
+  let data;
+  try { data = JSON.parse(await file.text()); }
+  catch { throw new Error('JSONファイルとして読み込めませんでした'); }
+  const list = Array.isArray(data) ? data : data?.recipes;
+  if (!Array.isArray(list)) throw new Error('バックアップファイルの形式が正しくありません');
+  let n = 0;
+  for (const x of list) {
+    if (!x || typeof x.title !== 'string' || !x.title.trim()) continue;
+    const photo = typeof x.photo === 'string' && x.photo.startsWith('data:image/')
+      ? await (await fetch(x.photo)).blob() : null;
+    await DB.put({
+      ...x,
+      id: x.id || uid(),
+      tags: Array.isArray(x.tags) ? x.tags : [],
+      ingredients: Array.isArray(x.ingredients) ? x.ingredients : [],
+      steps: Array.isArray(x.steps) ? x.steps : [],
+      photo,
+      createdAt: x.createdAt || Date.now(),
+      updatedAt: x.updatedAt || Date.now(),
+    });
+    n++;
+  }
+  return n;
+}
+
+async function renderSettings() {
+  setHeader({ title: '設定・バックアップ', back: '#/' });
+  const all = await DB.all();
+  const persisted = navigator.storage?.persisted ? await navigator.storage.persisted().catch(() => false) : false;
+  view.innerHTML = `
+    <section class="settings">
+      <div class="box">
+        <h3>バックアップ</h3>
+        <p class="muted">登録数：${all.length}件</p>
+        <p class="muted">レシピはこの端末の中だけに保存されています。ときどき書き出して、「ファイル」アプリ（iCloud Drive など）に保存しておくと安心です。</p>
+        <button class="btn primary wide" id="export">バックアップを書き出す</button>
+        <button class="btn secondary wide" id="importBtn">バックアップから読み込む</button>
+        <input type="file" id="importFile" accept=".json,application/json" hidden>
+        <p class="muted small">読み込むと、同じレシピは上書きされます。それ以外のレシピはそのまま残ります。</p>
+      </div>
+      <div class="box">
+        <h3>保存の状態</h3>
+        <p class="muted">${persisted ? '✅ 永続保存が有効です' : 'ホーム画面に追加して使うと、データが自動で消えにくくなります。'}</p>
+      </div>
+      <div class="box">
+        <h3>iPhoneへの入れ方</h3>
+        <p class="muted">SafariでこのページのURLを開き、共有ボタン（□↑）→「ホーム画面に追加」をタップします。</p>
+      </div>
+    </section>`;
+  $('#export').addEventListener('click', () => exportData().catch(e => toast('書き出しに失敗しました: ' + e.message)));
+  $('#importBtn').addEventListener('click', () => $('#importFile').click());
+  $('#importFile').addEventListener('change', async e => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    try {
+      const n = await importData(file);
+      toast(`${n}件のレシピを読み込みました`);
+      renderSettings();
+    } catch (err) {
+      toast(err.message);
+    }
+  });
+}
+
+/* ---------- ルーティング ---------- */
+let current = '';
+async function route() {
+  if (current === 'list') listState.scroll = window.scrollY;
+  releaseWakeLock();
+  const [, page = '', id = ''] = (location.hash.slice(1) || '/').split('/');
+  current = page || 'list';
+  try {
+    if (!page) { await renderList(); window.scrollTo(0, listState.scroll); return; }
+    window.scrollTo(0, 0);
+    if (page === 'r') return await renderDetail(decodeURIComponent(id));
+    if (page === 'edit') return await renderEdit(decodeURIComponent(id));
+    if (page === 'new') return await renderEdit(null);
+    if (page === 'settings') return await renderSettings();
+    location.replace('#/');
+  } catch (err) {
+    console.error(err);
+    view.innerHTML = `<p class="empty">エラーが発生しました：${esc(err.message)}</p>`;
+  }
+}
+
+window.addEventListener('hashchange', route);
+route();
+
+if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+  navigator.serviceWorker.register('sw.js').catch(err => console.warn('SW登録失敗', err));
+}
+navigator.storage?.persist?.().catch(() => {});
