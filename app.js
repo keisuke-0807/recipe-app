@@ -723,8 +723,18 @@ async function importData(file) {
   return { recipes: n, shopping: s };
 }
 
+// バージョンは sw.js が作るキャッシュの名前（recipe-book-v<番号>）から読み取る
+const CACHE_PREFIX = 'recipe-book-v'; // sw.js と同じ
+async function appVersion() {
+  try {
+    const nums = (await caches.keys()).filter(k => k.startsWith(CACHE_PREFIX)).map(k => Number(k.slice(CACHE_PREFIX.length))).filter(Number.isFinite);
+    return nums.length ? String(Math.max(...nums)) : '-';
+  } catch { return '-'; }
+}
+
 async function renderSettings() {
   setHeader({ title: '設定・バックアップ', back: '#/' });
+  const ver = await appVersion();
   const [all, shop] = await Promise.all([DB.all(), DB.shopping.all()]);
   // 使用容量：保存している文字データ（JSON換算）と写真の大きさを合計する
   const textBytes = all.reduce((a, r) => a + jsonBytes({ ...r, photo: null }), 0);
@@ -750,7 +760,7 @@ async function renderSettings() {
       </div>
       <div class="box">
         <h3>アプリについて</h3>
-        <p class="muted">バージョン ${esc(self.APP_VERSION)}</p>
+        <p class="muted">バージョン ${esc(ver)}</p>
         <button class="btn secondary wide" id="checkUpdate">更新を確認</button>
       </div>
       <div class="box">
