@@ -426,6 +426,8 @@ async function renderShopping() {
 }
 
 /* ---------- 編集 ---------- */
+// フォントに依存しないよう SVG で描く（上向き矢印＋線＝上とまとめる）
+const ICON_MERGE = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4h14M12 20V9M7 13l5-5 5 5"/></svg>';
 const ingRow = (i = {}) => `
   <div class="row ing">
     <input class="name" placeholder="材料" value="${esc(i.name)}" enterkeyhint="next">
@@ -439,7 +441,7 @@ const stepRow = (s = '') => `
     <div class="ops">
       <button type="button" class="icon-btn up" aria-label="上へ">↑</button>
       <button type="button" class="icon-btn down" aria-label="下へ">↓</button>
-      <button type="button" class="icon-btn merge" aria-label="上の手順とまとめる" title="上とまとめる">⤒</button>
+      <button type="button" class="icon-btn merge" aria-label="上の手順とまとめる" title="上とまとめる">${ICON_MERGE}</button>
       <button type="button" class="icon-btn del" aria-label="削除">×</button>
     </div>
   </div>`;
@@ -738,10 +740,21 @@ async function renderSettings() {
         <p class="muted">${persisted ? '✅ 永続保存が有効です' : 'ホーム画面に追加して使うと、データが自動で消えにくくなります。'}</p>
       </div>
       <div class="box">
+        <h3>アプリについて</h3>
+        <p class="muted">バージョン ${esc(self.APP_VERSION)}</p>
+        <button class="btn secondary wide" id="checkUpdate">更新を確認</button>
+      </div>
+      <div class="box">
         <h3>iPhoneへの入れ方</h3>
         <p class="muted">SafariでこのページのURLを開き、共有ボタン（□↑）→「ホーム画面に追加」をタップします。</p>
       </div>
     </section>`;
+  $('#checkUpdate').addEventListener('click', async () => {
+    const reg = await navigator.serviceWorker?.getRegistration();
+    if (!reg) { toast('この環境では更新の確認ができません'); return; }
+    try { await reg.update(); } catch { toast('確認できませんでした（オフラインかもしれません）'); return; }
+    toast(reg.installing || reg.waiting ? '新しいバージョンを準備しています…' : '最新版です');
+  });
   $('#export').addEventListener('click', () => exportData().catch(e => toast('書き出しに失敗しました: ' + e.message)));
   $('#importBtn').addEventListener('click', () => $('#importFile').click());
   $('#importFile').addEventListener('change', async e => {
@@ -783,7 +796,19 @@ async function route() {
 window.addEventListener('hashchange', route);
 route();
 
+/* ---------- 更新の確認とお知らせ ---------- */
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
-  navigator.serviceWorker.register('sw.js').catch(err => console.warn('SW登録失敗', err));
+  // すでに古いバージョンで動いていた場合だけ「更新」を知らせる（初回インストール時は出さない）
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (hadController) $('#updateBar').hidden = false;
+  });
+  $('#updateNow').addEventListener('click', () => location.reload());
+  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(reg => {
+    // ホーム画面アプリはバックグラウンドから戻っても再読み込みされないので、戻ったときにも確認する
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') reg.update().catch(() => {});
+    });
+  }).catch(err => console.warn('SW登録失敗', err));
 }
 navigator.storage?.persist?.().catch(() => {});
