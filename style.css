@@ -252,6 +252,8 @@ fieldset > div { display: grid; gap: 8px; counter-reset: step; }
 .box { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; }
 .box h3 { margin: 0 0 6px; font-size: 16px; }
 .box p { margin: 6px 0; }
+.box .usage { font-weight: 700; margin-bottom: 0; }
+.box .usage + .small { margin-top: 0; }
 
 /* 更新のお知らせ */
 .update-bar {

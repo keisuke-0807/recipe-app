@@ -12,6 +12,9 @@ const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString
 // 検索用の正規化：全角→半角、大文字→小文字、カタカナ→ひらがな
 const norm = s => String(s ?? '').normalize('NFKC').toLowerCase()
   .replace(/[ァ-ヶ]/g, c => String.fromCharCode(c.charCodeAt(0) - 0x60));
+// データの大きさ（UTF-8でのバイト数）と表示用の単位
+const jsonBytes = v => (Array.isArray(v) && !v.length ? 0 : new Blob([JSON.stringify(v)]).size);
+const fmtSize = b => (b === 0 ? "0KB" : b < 1024 * 1024 ? `${(b / 1024).toFixed(b < 10 * 1024 ? 1 : 0)}KB` : `${(b / 1024 / 1024).toFixed(1)}MB`);
 const safeURL = u => /^https?:\/\//i.test(String(u || '').trim());
 // 参考URL：旧データ（source: 文字列1つ）と新データ（sources: 配列）の両方に対応
 const sourcesOf = r => Array.isArray(r.sources) ? r.sources.filter(u => typeof u === 'string' && u.trim())
@@ -723,12 +726,18 @@ async function importData(file) {
 async function renderSettings() {
   setHeader({ title: '設定・バックアップ', back: '#/' });
   const [all, shop] = await Promise.all([DB.all(), DB.shopping.all()]);
+  // 使用容量：保存している文字データ（JSON換算）と写真の大きさを合計する
+  const textBytes = all.reduce((a, r) => a + jsonBytes({ ...r, photo: null }), 0);
+  const photos = all.filter(r => r.photo);
+  const photoBytes = photos.reduce((a, r) => a + (r.photo.size || 0), 0);
+  const totalBytes = textBytes + photoBytes + jsonBytes(shop);
   const persisted = navigator.storage?.persisted ? await navigator.storage.persisted().catch(() => false) : false;
   view.innerHTML = `
     <section class="settings">
       <div class="box">
         <h3>バックアップ</h3>
-        <p class="muted">レシピ：${all.length}件 / 買い物リスト：${shop.length}件</p>
+        <p class="usage">使用容量：約 ${fmtSize(totalBytes)}</p>
+        <p class="muted small">（レシピ ${all.length}件 約${fmtSize(textBytes)} ／ 写真 ${photos.length}枚 約${fmtSize(photoBytes)} ／ 買い物リスト ${shop.length}件）</p>
         <p class="muted">レシピはこの端末の中だけに保存されています。ときどき書き出して、「ファイル」アプリ（iCloud Drive など）に保存しておくと安心です。</p>
         <button class="btn primary wide" id="export">バックアップを書き出す</button>
         <button class="btn secondary wide" id="importBtn">バックアップから読み込む</button>

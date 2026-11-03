@@ -1,2 +1,2 @@
 // アプリのバージョン。更新を公開するときはこの数字を1つ上げる（sw.js もこれを読む）
-self.APP_VERSION = 5;
+self.APP_VERSION = 6;
