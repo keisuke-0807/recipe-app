@@ -149,7 +149,14 @@ main { max-width: 720px; margin: 0 auto; padding: 0 max(16px, env(safe-area-inse
 .checklist li.done .amt { color: var(--done); }
 .steps li.done::before { background: var(--done); }
 .memo { white-space: pre-wrap; margin: 0; }
-.source { word-break: break-all; }
+.sources { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.sources a {
+  display: grid; gap: 2px; padding: 10px 12px; border-radius: 10px; text-decoration: none;
+  background: var(--surface); border: 1px solid var(--line);
+}
+.sources .site { font-weight: 600; }
+.sources .url { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row.url input { flex: 1; }
 .hint { color: var(--muted); font-size: 13px; text-align: center; margin-top: 32px; }
 .muted { color: var(--muted); }
 .small { font-size: 13px; }
@@ -190,9 +197,11 @@ fieldset > div { display: grid; gap: 8px; counter-reset: step; }
   width: 26px; height: 26px; margin-top: 9px; border-radius: 50%;
   background: var(--accent); color: var(--accent-text); font-size: 13px; font-weight: 700;
 }
-.row.step textarea { flex: 1; }
+.row.step { align-items: stretch; }
+.row.step textarea { flex: 1; min-height: 72px; }
 .row.step .ops { display: flex; flex-direction: column; }
 .row.step .ops .icon-btn { height: 28px; }
+#stepRows .row.step:first-child .merge { visibility: hidden; }
 .fs-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .fs-actions .btn { padding: 8px 14px; font-size: 14px; }
 .bulk { display: grid; gap: 6px; padding: 12px; border-radius: 12px; background: var(--accent-soft); }
@@ -201,7 +210,7 @@ fieldset > div { display: grid; gap: 8px; counter-reset: step; }
   border: 1px solid var(--line); background: var(--surface); font-size: 16px;
 }
 .bulk p { margin: 0; }
-.bulk-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.bulk-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .bulk-actions .btn { padding: 8px 14px; font-size: 14px; }
 .bulk-actions .btn.secondary { background: var(--surface); }
 

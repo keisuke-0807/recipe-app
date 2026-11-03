@@ -13,6 +13,15 @@ const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString
 const norm = s => String(s ?? '').normalize('NFKC').toLowerCase()
   .replace(/[ァ-ヶ]/g, c => String.fromCharCode(c.charCodeAt(0) - 0x60));
 const safeURL = u => /^https?:\/\//i.test(String(u || '').trim());
+// 参考URL：旧データ（source: 文字列1つ）と新データ（sources: 配列）の両方に対応
+const sourcesOf = r => Array.isArray(r.sources) ? r.sources.filter(u => typeof u === 'string' && u.trim())
+  : (typeof r.source === 'string' && r.source.trim() ? [r.source] : []);
+// 「cookpad.com/...」のようにスキームが省略されていたら https:// を補う
+const normalizeURL = u => {
+  u = u.trim();
+  return u && !/^[a-z][a-z0-9+.-]*:/i.test(u) && /^[^\s/]+\.[^\s/]+/.test(u) ? `https://${u}` : u;
+};
+const siteName = u => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return u; } };
 
 /* ---------- 共通 UI ---------- */
 function setHeader({ title = '', back = '', actions = '' }) {
@@ -269,7 +278,7 @@ function addSample() {
       'じゃがいもに竹串がすっと通ったら完成。',
     ],
     memo: 'これはサンプルです。編集・削除して自由に使ってください。',
-    source: '', photo: null, favorite: false, createdAt: now, updatedAt: now,
+    sources: [], photo: null, favorite: false, createdAt: now, updatedAt: now,
   });
 }
 
@@ -285,6 +294,7 @@ async function renderDetail(id) {
   const base = Number(r.servings) || 0;
   let servings = base;
   const meta = [r.category, r.time ? `⏱ ${r.time}分` : '', base ? `${base}人分` : ''].filter(Boolean);
+  const links = sourcesOf(r).map(u => u.trim()).filter(safeURL);
   view.innerHTML = `
     ${r.photo ? `<img class="hero" src="${photoURL(r)}" alt="">` : ''}
     <article class="detail">
@@ -300,7 +310,8 @@ async function renderDetail(id) {
       <h3>作り方</h3>
       <ol class="steps checklist">${(r.steps || []).map(s => `<li>${esc(s)}</li>`).join('') || '<li class="muted">（未登録）</li>'}</ol>
       ${r.memo ? `<h3>メモ</h3><p class="memo">${esc(r.memo)}</p>` : ''}
-      ${safeURL(r.source) ? `<h3>参考</h3><p><a class="source" href="${esc(r.source.trim())}" target="_blank" rel="noopener">${esc(r.source)}</a></p>` : ''}
+      ${links.length ? `<h3>参考</h3><ul class="sources">${links.map(u => `
+        <li><a href="${esc(u)}" target="_blank" rel="noopener"><span class="site">🔗 ${esc(siteName(u))}</span><span class="url">${esc(u)}</span></a></li>`).join('')}</ul>` : ''}
       <p class="hint">材料や手順はタップするとチェックできます</p>
       <button class="btn secondary wide" id="wake">🔆 調理モード（画面を消さない）</button>
     </article>`;
@@ -428,16 +439,24 @@ const stepRow = (s = '') => `
     <div class="ops">
       <button type="button" class="icon-btn up" aria-label="上へ">↑</button>
       <button type="button" class="icon-btn down" aria-label="下へ">↓</button>
+      <button type="button" class="icon-btn merge" aria-label="上の手順とまとめる" title="上とまとめる">⤒</button>
       <button type="button" class="icon-btn del" aria-label="削除">×</button>
     </div>
   </div>`;
 
-const bulkPanel = (kind, placeholder, help, applyLabel) => `
+const urlRow = (u = '') => `
+  <div class="row url">
+    <input class="url" type="url" inputmode="url" placeholder="https://..." value="${esc(u)}">
+    <button type="button" class="icon-btn del" aria-label="削除">×</button>
+  </div>`;
+
+const bulkPanel = (kind, placeholder, help, applyLabel, oneLabel = '') => `
   <div class="bulk" id="bulk-${kind}" hidden>
     <textarea rows="4" placeholder="${esc(placeholder)}"></textarea>
     <p class="muted small">${esc(help)}</p>
     <div class="bulk-actions">
       <button type="button" class="btn secondary" data-bulk-cancel>やめる</button>
+      ${oneLabel ? `<button type="button" class="btn secondary" data-bulk-apply="${kind}" data-mode="one">${esc(oneLabel)}</button>` : ''}
       <button type="button" class="btn primary" data-bulk-apply="${kind}">${esc(applyLabel)}</button>
     </div>
   </div>`;
@@ -445,7 +464,8 @@ const bulkPanel = (kind, placeholder, help, applyLabel) => `
 async function renderEdit(id) {
   const r = id ? await DB.get(id) : null;
   if (id && !r) { location.replace('#/'); return; }
-  const d = r || { title: '', category: '', servings: 2, time: '', tags: [], ingredients: [{}, {}, {}], steps: ['', ''], memo: '', source: '' };
+  const d = r || { title: '', category: '', servings: 2, time: '', tags: [], ingredients: [{}, {}, {}], steps: ['', ''], memo: '' };
+  const srcs = r ? sourcesOf(r) : [];
   let photo = r?.photo || null;
   let previewURL = '';
 
@@ -484,10 +504,16 @@ async function renderEdit(id) {
           <button type="button" class="btn secondary" id="addStep">＋ 手順を追加</button>
           <button type="button" class="btn secondary" data-bulk="step">🎤 まとめて入力</button>
         </div>
-        ${bulkPanel('step', '例：じゃがいもを一口大に切る。鍋で炒める。水を入れて15分煮る。', '「。」で区切って話すか、1行に1手順ずつ書くと、手順ごとに分かれます。', '手順に追加')}
+        ${bulkPanel('step', '例：じゃがいもを一口大に切る。鍋で炒める。水を入れて15分煮る。',
+          '「手順に分けて追加」は「。」ごとに分けます。改行があるときは1行＝1手順になり、「。」では分けません（音声入力では「かいぎょう」で改行）。全部を1つの手順にしたいときは「1つの手順として追加」を押してください。',
+          '手順に分けて追加', '1つの手順として追加')}
       </fieldset>
       <label class="field"><span>メモ</span><textarea name="memo" rows="3" placeholder="コツ・アレンジなど">${esc(d.memo)}</textarea></label>
-      <label class="field"><span>参考URL</span><input name="source" type="url" inputmode="url" value="${esc(d.source)}" placeholder="https://..."></label>
+      <fieldset>
+        <legend>参考URL</legend>
+        <div id="urlRows">${(srcs.length ? srcs : ['']).map(urlRow).join('')}</div>
+        <div class="fs-actions"><button type="button" class="btn secondary" id="addUrl">＋ URLを追加</button></div>
+      </fieldset>
       <button class="btn primary wide" type="submit">保存</button>
       ${r ? '<button type="button" class="btn danger wide" id="delete">このレシピを削除</button>' : ''}
     </form>`;
@@ -520,12 +546,19 @@ async function renderEdit(id) {
   };
   $('#addIng').addEventListener('click', () => addRow($('#ingRows'), ingRow()));
   $('#addStep').addEventListener('click', () => addRow($('#stepRows'), stepRow()));
+  $('#addUrl').addEventListener('click', () => addRow($('#urlRows'), urlRow()));
 
-  const applyBulk = kind => {
+  const applyBulk = (kind, mode) => {
     const panel = $(`#bulk-${kind}`);
     const ta = $('textarea', panel);
     const isIng = kind === 'ing';
-    const parsed = isIng ? parseIngredients(ta.value) : parseSteps(ta.value);
+    let parsed;
+    if (isIng) parsed = parseIngredients(ta.value);
+    else if (mode === 'one') {
+      // 区切らずに丸ごと1つの手順にする（改行は詰める）
+      const one = ta.value.split(/\r?\n/).map(s => s.trim()).filter(Boolean).join('');
+      parsed = one ? [one] : [];
+    } else parsed = parseSteps(ta.value);
     if (!parsed.length) { toast(isIng ? '材料が見つかりませんでした' : '手順が見つかりませんでした'); return; }
     // 空の行は取り除いてから、解析結果を末尾に追加する
     if (isIng) $$('.row.ing').filter(x => !$('.name', x).value.trim() && !$('.amount', x).value.trim()).forEach(x => x.remove());
@@ -551,11 +584,20 @@ async function renderEdit(id) {
       return;
     }
     const apply = e.target.closest('[data-bulk-apply]');
-    if (apply) { applyBulk(apply.dataset.bulkApply); return; }
+    if (apply) { applyBulk(apply.dataset.bulkApply, apply.dataset.mode); return; }
 
     const row = e.target.closest('.row');
     if (!row) return;
-    if (e.target.closest('.del')) row.remove();
+    if (e.target.closest('.merge')) {
+      const prev = row.previousElementSibling;
+      if (!prev) return;
+      const pt = $('textarea', prev), a = pt.value.trim(), b = $('textarea', row).value.trim();
+      // 上の手順が句点などで終わっていなければ「。」を補ってつなげる
+      pt.value = a && b && !/[。．.!！?？]$/.test(a) ? `${a}。${b}` : a + b;
+      row.remove();
+      toast('上の手順とまとめました');
+    }
+    else if (e.target.closest('.del')) row.remove();
     else if (e.target.closest('.up') && row.previousElementSibling) row.after(row.previousElementSibling);
     else if (e.target.closest('.down') && row.nextElementSibling) row.before(row.nextElementSibling);
   });
@@ -586,12 +628,13 @@ async function renderEdit(id) {
         .filter(i => i.name || i.amount),
       steps: $$('.row.step textarea').map(t => t.value.trim()).filter(Boolean),
       memo: fd.get('memo').trim(),
-      source: fd.get('source').trim(),
+      sources: [...new Set($$('.row.url input').map(i => normalizeURL(i.value)).filter(Boolean))],
       photo,
       favorite: r?.favorite || false,
       createdAt: r?.createdAt || now,
       updatedAt: now,
     };
+    delete rec.source; // 旧形式のフィールドは sources に移行済み
     try {
       await DB.put(rec);
     } catch (err) {
@@ -647,16 +690,19 @@ async function importData(file) {
     if (!x || typeof x.title !== 'string' || !x.title.trim()) continue;
     const photo = typeof x.photo === 'string' && x.photo.startsWith('data:image/')
       ? await (await fetch(x.photo)).blob() : null;
-    await DB.put({
+    const rec = {
       ...x,
       id: x.id || uid(),
+      sources: sourcesOf(x),
       tags: Array.isArray(x.tags) ? x.tags : [],
       ingredients: Array.isArray(x.ingredients) ? x.ingredients : [],
       steps: Array.isArray(x.steps) ? x.steps : [],
       photo,
       createdAt: x.createdAt || Date.now(),
       updatedAt: x.updatedAt || Date.now(),
-    });
+    };
+    delete rec.source;
+    await DB.put(rec);
     n++;
   }
   let s = 0;
