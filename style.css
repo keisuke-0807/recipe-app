@@ -195,6 +195,37 @@ fieldset > div { display: grid; gap: 8px; counter-reset: step; }
 .row.step .ops .icon-btn { height: 28px; }
 fieldset > .btn { justify-self: start; padding: 8px 14px; font-size: 14px; }
 
+/* 買い物リスト */
+.badge-wrap { position: relative; }
+.badge {
+  position: absolute; top: 4px; right: 2px; min-width: 18px; height: 18px; padding: 0 5px;
+  border-radius: 999px; background: var(--danger); color: #fff;
+  font-size: 11px; font-weight: 700; line-height: 18px; text-align: center;
+}
+.shop-add { display: flex; gap: 8px; padding: 14px 0 10px; }
+.shop-add input {
+  flex: 1; min-width: 0; padding: 10px 12px; border-radius: 10px;
+  border: 1px solid var(--line); background: var(--surface); font-size: 16px;
+}
+.shop-add .btn { padding: 10px 16px; }
+.shop { list-style: none; margin: 0; padding: 0; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.shop:has(.empty) { background: none; border: 0; }
+.shop-item { display: flex; align-items: center; gap: 12px; padding: 8px 4px 8px 14px; border-top: 1px solid var(--line); cursor: pointer; }
+.shop-item:first-child { border-top: 0; }
+.shop-item .box {
+  flex: none; width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center;
+  border: 2px solid var(--accent); color: var(--accent-text); font-size: 14px; font-weight: 700;
+}
+.shop-item .txt { flex: 1; min-width: 0; }
+.shop-item .line { display: flex; justify-content: space-between; gap: 12px; }
+.shop-item .amt { color: var(--muted); white-space: nowrap; }
+.shop-item .from { color: var(--muted); font-size: 12px; }
+.shop-item .del { color: var(--muted); font-size: 18px; min-width: 40px; }
+.shop-item.done .box { background: var(--done); border-color: var(--done); }
+.shop-item.done .nm, .shop-item.done .amt { color: var(--done); text-decoration: line-through; }
+.shop-actions { margin-top: 8px; }
+.shop-actions p { text-align: center; margin: 8px 0; }
+
 /* 設定 */
 .settings { padding-top: 16px; display: grid; gap: 14px; }
 .box { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; }

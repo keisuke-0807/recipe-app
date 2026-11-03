@@ -125,8 +125,13 @@ const card = r => `
   </a></li>`;
 
 async function renderList() {
-  setHeader({ title: 'レシピ帳', actions: '<a class="icon-btn" href="#/settings" aria-label="設定">⚙︎</a>' });
-  const all = await DB.all();
+  const [all, shop] = await Promise.all([DB.all(), DB.shopping.all()]);
+  const toBuy = shop.filter(i => !i.checked).length;
+  setHeader({
+    title: 'レシピ帳',
+    actions: `<a class="icon-btn badge-wrap" href="#/shopping" aria-label="買い物リスト">🛒${toBuy ? `<span class="badge">${toBuy}</span>` : ''}</a>
+              <a class="icon-btn" href="#/settings" aria-label="設定">⚙︎</a>`,
+  });
   const usedCats = new Set(all.map(r => r.category).filter(Boolean));
   const cats = [...CATEGORIES.filter(c => usedCats.has(c)), ...[...usedCats].filter(c => !CATEGORIES.includes(c))];
   view.innerHTML = `
@@ -209,6 +214,7 @@ async function renderDetail(id) {
         ${base ? '<div class="stepper"><button id="minus" aria-label="人数を減らす">−</button><span id="srv"></span><button id="plus" aria-label="人数を増やす">＋</button></div>' : ''}
       </div>
       <ul class="ingredients checklist" id="ing"></ul>
+      ${(r.ingredients || []).length ? '<button class="btn secondary wide" id="toShop">🛒 買い物リストに追加</button>' : ''}
       <h3>作り方</h3>
       <ol class="steps checklist">${(r.steps || []).map(s => `<li>${esc(s)}</li>`).join('') || '<li class="muted">（未登録）</li>'}</ol>
       ${r.memo ? `<h3>メモ</h3><p class="memo">${esc(r.memo)}</p>` : ''}
@@ -239,6 +245,91 @@ async function renderDetail(id) {
     toast(r.favorite ? 'お気に入りに追加しました' : 'お気に入りから外しました');
   });
   $('#wake').addEventListener('click', e => toggleWake(e.currentTarget));
+  $('#toShop')?.addEventListener('click', async () => {
+    const existing = (await DB.shopping.all()).filter(i => i.recipeId === r.id && !i.checked);
+    if (existing.length && !confirm('このレシピの材料はすでに買い物リストに入っています。\nもう一度追加しますか？')) return;
+    const f = base ? servings / base : 1;
+    const now = Date.now();
+    const items = (r.ingredients || []).filter(i => i.name);
+    await Promise.all(items.map((i, n) => DB.shopping.put({
+      id: uid(), name: i.name, amount: scaleAmount(i.amount, f),
+      recipeId: r.id, recipeTitle: r.title, checked: false, createdAt: now + n,
+    })));
+    toast(`${items.length}件を買い物リストに追加しました`);
+  });
+}
+
+/* ---------- 買い物リスト ---------- */
+async function renderShopping() {
+  setHeader({ title: '買い物リスト', back: '#/' });
+  view.innerHTML = `
+    <form class="shop-add" id="addForm" autocomplete="off">
+      <input id="newName" placeholder="品名を追加（例：牛乳）" enterkeyhint="done">
+      <button class="btn primary" type="submit">追加</button>
+    </form>
+    <ul class="shop" id="shop"></ul>
+    <div class="shop-actions" id="shopActions"></div>`;
+  let items = await DB.shopping.all();
+
+  const draw = () => {
+    items.sort((a, b) => (a.checked - b.checked) || (a.createdAt - b.createdAt));
+    const left = items.filter(i => !i.checked).length;
+    $('#shop').innerHTML = items.length ? items.map(i => `
+      <li class="shop-item ${i.checked ? 'done' : ''}" data-id="${esc(i.id)}">
+        <span class="box" aria-hidden="true">${i.checked ? '✓' : ''}</span>
+        <div class="txt">
+          <div class="line"><span class="nm">${esc(i.name)}</span>${i.amount ? `<span class="amt">${esc(i.amount)}</span>` : ''}</div>
+          ${i.recipeTitle ? `<div class="from">${esc(i.recipeTitle)}</div>` : ''}
+        </div>
+        <button class="icon-btn del" aria-label="削除">×</button>
+      </li>`).join('')
+      : '<li class="empty">買い物リストは空です。<br>レシピの「🛒 買い物リストに追加」か、上の欄から追加できます。</li>';
+    $('#shopActions').innerHTML = items.length ? `
+      <p class="muted small">残り ${left} 件 / 全 ${items.length} 件</p>
+      ${items.length - left ? '<button class="btn secondary wide" id="clearDone">チェック済みを削除</button>' : ''}
+      <button class="btn danger wide" id="clearAll">すべて削除</button>` : '';
+  };
+  draw();
+
+  $('#addForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const input = $('#newName');
+    const name = input.value.trim();
+    if (!name) return;
+    const item = { id: uid(), name, amount: '', recipeId: '', recipeTitle: '', checked: false, createdAt: Date.now() };
+    await DB.shopping.put(item);
+    items.push(item);
+    input.value = '';
+    draw();
+    input.focus();
+  });
+
+  $('#shop').addEventListener('click', async e => {
+    const li = e.target.closest('.shop-item');
+    if (!li) return;
+    const item = items.find(i => i.id === li.dataset.id);
+    if (!item) return;
+    if (e.target.closest('.del')) {
+      await DB.shopping.del(item.id);
+      items = items.filter(i => i !== item);
+    } else {
+      item.checked = !item.checked;
+      await DB.shopping.put(item);
+    }
+    draw();
+  });
+
+  $('#shopActions').addEventListener('click', async e => {
+    let targets;
+    if (e.target.id === 'clearDone') targets = items.filter(i => i.checked);
+    else if (e.target.id === 'clearAll') {
+      if (!confirm('買い物リストをすべて削除しますか？')) return;
+      targets = items;
+    } else return;
+    await Promise.all(targets.map(i => DB.shopping.del(i.id)));
+    items = items.filter(i => !targets.includes(i));
+    draw();
+  });
 }
 
 /* ---------- 編集 ---------- */
@@ -395,9 +486,9 @@ async function renderEdit(id) {
 
 /* ---------- 設定・バックアップ ---------- */
 async function exportData() {
-  const all = await DB.all();
+  const [all, shopping] = await Promise.all([DB.all(), DB.shopping.all()]);
   const recipes = await Promise.all(all.map(async r => ({ ...r, photo: r.photo ? await blobToDataURL(r.photo) : null })));
-  const json = JSON.stringify({ app: 'recipe-book', version: 1, exportedAt: new Date().toISOString(), recipes });
+  const json = JSON.stringify({ app: 'recipe-book', version: 2, exportedAt: new Date().toISOString(), recipes, shopping });
   const name = `recipes-${new Date().toISOString().slice(0, 10)}.json`;
   const file = new File([json], name, { type: 'application/json' });
   // iPhone では共有シート経由で「ファイルに保存」できるようにする
@@ -437,18 +528,28 @@ async function importData(file) {
     });
     n++;
   }
-  return n;
+  let s = 0;
+  for (const x of Array.isArray(data?.shopping) ? data.shopping : []) {
+    if (!x || typeof x.name !== 'string' || !x.name.trim()) continue;
+    await DB.shopping.put({
+      id: x.id || uid(), name: x.name, amount: String(x.amount ?? ''),
+      recipeId: x.recipeId || '', recipeTitle: x.recipeTitle || '',
+      checked: !!x.checked, createdAt: x.createdAt || Date.now(),
+    });
+    s++;
+  }
+  return { recipes: n, shopping: s };
 }
 
 async function renderSettings() {
   setHeader({ title: '設定・バックアップ', back: '#/' });
-  const all = await DB.all();
+  const [all, shop] = await Promise.all([DB.all(), DB.shopping.all()]);
   const persisted = navigator.storage?.persisted ? await navigator.storage.persisted().catch(() => false) : false;
   view.innerHTML = `
     <section class="settings">
       <div class="box">
         <h3>バックアップ</h3>
-        <p class="muted">登録数：${all.length}件</p>
+        <p class="muted">レシピ：${all.length}件 / 買い物リスト：${shop.length}件</p>
         <p class="muted">レシピはこの端末の中だけに保存されています。ときどき書き出して、「ファイル」アプリ（iCloud Drive など）に保存しておくと安心です。</p>
         <button class="btn primary wide" id="export">バックアップを書き出す</button>
         <button class="btn secondary wide" id="importBtn">バックアップから読み込む</button>
@@ -472,7 +573,7 @@ async function renderSettings() {
     if (!file) return;
     try {
       const n = await importData(file);
-      toast(`${n}件のレシピを読み込みました`);
+      toast(`レシピ${n.recipes}件${n.shopping ? `・買い物リスト${n.shopping}件` : ''}を読み込みました`);
       renderSettings();
     } catch (err) {
       toast(err.message);
@@ -494,6 +595,7 @@ async function route() {
     if (page === 'edit') return await renderEdit(decodeURIComponent(id));
     if (page === 'new') return await renderEdit(null);
     if (page === 'settings') return await renderSettings();
+    if (page === 'shopping') return await renderShopping();
     location.replace('#/');
   } catch (err) {
     console.error(err);

@@ -1,6 +1,6 @@
 // オフライン対応用 Service Worker
 // キャッシュを先に返しつつ裏で最新版を取得する（次回起動時に更新が反映される）
-const CACHE = 'recipe-book-v1';
+const CACHE = 'recipe-book-v2';
 const ASSETS = [
   './', './index.html', './style.css', './db.js', './app.js', './manifest.webmanifest',
   './icons/icon-180.png', './icons/icon-192.png', './icons/icon-512.png',
